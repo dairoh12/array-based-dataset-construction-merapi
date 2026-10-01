@@ -125,8 +125,9 @@ BMKG catalogue    BPPTKG catalogue
       v                v
    SVM-RBF          XGBoost
 Beamforming and FK analysis are used during the dataset-construction and validation stages. They are not used as machine-learning input features in the classification stage of this study.
+-----
 
-4. Waveform Preprocessing
+## 4. Waveform Preprocessing 
 
 The preprocessing workflow includes:
 
@@ -143,8 +144,9 @@ The main frequency band used in the dataset-construction workflow is:
 0.8–1.8 Hz
 
 The preprocessing parameters implemented in the source code should be considered together with the configuration files and scripts included in this repository.
+----
 
-5. Candidate Event Detection
+## 5. Candidate Event Detection
 
 Candidate seismic events are initially detected from the continuous recordings using the Short-Term Average/Long-Term Average (STA/LTA) method.
 
@@ -154,7 +156,7 @@ Importantly, STA/LTA detections are treated as candidate events rather than auto
 
 Each candidate is subsequently evaluated using array processing and catalogue validation.
 
-6. Array-Based Evaluation
+## 6. Array-Based Evaluation
 
 Each candidate event is evaluated using the spatial coherence and propagation characteristics observed across the five stations.
 
@@ -168,6 +170,7 @@ enhance coherent seismic signals;
 suppress relatively incoherent components;
 evaluate signal coherence across the array; and
 determine the maximum beam power associated with the dominant arrival.
+
 6.2 Frequency–Wavenumber Analysis
 
 Frequency–Wavenumber (FK) analysis is used to estimate propagation characteristics, particularly:
@@ -177,7 +180,7 @@ slowness.
 
 The array-derived propagation parameters are subsequently used as supporting information during event validation.
 
-7. Catalogue Validation and Event Labelling
+## 7. Catalogue Validation and Event Labelling
 
 Candidate events are compared with two independent reference catalogues:
 
@@ -195,7 +198,7 @@ Candidates that satisfy the array-processing criteria and catalogue-validation r
 
 A final manual waveform-quality-control step is also performed to remove events that cannot be adequately verified or show ambiguous characteristics.
 
-8. Dataset Construction
+## 8. Dataset Construction
 
 The initial STA/LTA detection produced:
 
