@@ -126,7 +126,6 @@ BMKG catalogue    BPPTKG catalogue
    SVM-RBF          XGBoost
 Beamforming and FK analysis are used during the dataset-construction and validation stages. They are not used as machine-learning input features in the classification stage of this study.
 
-
 ---
 
 ## 4. Waveform Preprocessing 
@@ -146,7 +145,8 @@ The main frequency band used in the dataset-construction workflow is:
 0.8–1.8 Hz
 
 The preprocessing parameters implemented in the source code should be considered together with the configuration files and scripts included in this repository.
-----
+
+---
 
 ## 5. Candidate Event Detection
 
@@ -157,6 +157,8 @@ STA/LTA detection is used as an initial screening procedure to identify time int
 Importantly, STA/LTA detections are treated as candidate events rather than automatically identified seismic events.
 
 Each candidate is subsequently evaluated using array processing and catalogue validation.
+
+---
 
 ## 6. Array-Based Evaluation
 
@@ -181,6 +183,7 @@ back azimuth; and
 slowness.
 
 The array-derived propagation parameters are subsequently used as supporting information during event validation.
+---
 
 ## 7. Catalogue Validation and Event Labelling
 
@@ -199,6 +202,8 @@ Catalogue matching is performed using event timing and the corresponding matchin
 Candidates that satisfy the array-processing criteria and catalogue-validation requirements are retained for the final labelled dataset.
 
 A final manual waveform-quality-control step is also performed to remove events that cannot be adequately verified or show ambiguous characteristics.
+
+---
 
 ## 8. Dataset Construction
 
@@ -264,6 +269,7 @@ Spectral centroid
 Spectral entropy
 
 These features represent complementary characteristics of waveform amplitude, temporal shape, and frequency-domain energy distribution.
+---
 
 ## 10. Machine-Learning Models
 
@@ -279,7 +285,7 @@ Extreme Gradient Boosting is used as a tree-based ensemble classification model.
 
 The two approaches provide complementary modelling strategies for evaluating the classification of the extracted temporal and spectral features.
 
------
+----
 
 ## 11. Model Training and Hyperparameter Optimisation
 
@@ -302,6 +308,7 @@ The machine-learning pipeline incorporates preprocessing and class-balancing ope
 Standardisation and SMOTE are fitted only on the training data within the cross-validation process to prevent information from the test data from being used during model training.
 
 The detailed parameter search spaces used in the study are provided in the corresponding source code and configuration files.
+---
 
 ## 12. Evaluation Metrics
 
@@ -322,6 +329,7 @@ Learning curves
 Macro-averaged metrics are used to evaluate performance across all classes without weighting classes according to their sample size.
 
 Weighted-F1 accounts for the relative number of samples in each class.
+---
 
 ## 13. Principal Component Analysis
 
@@ -335,6 +343,7 @@ variance distribution; and
 relationships among the extracted features.
 
 PCA is not used as an input transformation within the machine-learning classification pipeline.
+---
 
 ## 14. Repository Structure
 
@@ -373,6 +382,7 @@ array-based-dataset-construction-merapi/
     └── data_format.md
 
 Note: The exact filenames in this structure should be updated to match the final source files actually uploaded to the repository.
+---
 
 ## 15. Software Requirements
 
@@ -428,6 +438,7 @@ Install the required dependencies:
 pip install -r requirements.txt
 
 Note: The commands above should be verified against the final repository structure and operating-system requirements before publication.
+---
 
 ## 17. Quick Test
 
@@ -487,6 +498,7 @@ A synthetic or example dataset is provided for the quick-test workflow.
 The example dataset is intended only to verify software execution and demonstrate the required input structure.
 
 It should not be interpreted as the original research dataset.
+---
 
 ## 19. Expected Outputs
 
@@ -508,6 +520,7 @@ AUC results; and
 learning curves.
 
 The exact output filenames and directory structure are described in the documentation accompanying each source module.
+---
 
 ## 20. Reproducibility
 
@@ -554,6 +567,7 @@ a quick-test procedure; and
 example outputs where applicable.
 
 The limitations caused by restricted access to the original waveform data are explicitly documented.
+---
 
 21. Reproducing the Main Study
 
@@ -583,6 +597,7 @@ The repository therefore does not redistribute the original continuous waveform 
 The public repository provides example/synthetic data for testing the computational implementation.
 
 Reference catalogue sources are described in the manuscript and should be accessed through their respective data providers where permitted.
+---
 
 ## 23. Code Availability
 
@@ -602,6 +617,7 @@ Repository:
 [REPOSITORY_URL]
 
 The repository is intended to support transparent inspection and reuse of the computational workflow described in the associated publication.
+---
 
 ## 24. Citation
 
@@ -614,6 +630,7 @@ Computers & Geosciences.
 DOI:
 
 [DOI_TO_BE_ADDED_AFTER_PUBLICATION]
+---
 
 ## 25. Authors
 
@@ -629,10 +646,12 @@ Department of Computer Science and Electronics, Faculty of Mathematics and Natur
 
 Wiwit Suryanto
 Department of Physics, Faculty of Mathematics and Natural Sciences, Universitas Gadjah Mada, Indonesia
+---
 
 ## 26. Acknowledgement
 
 The authors acknowledge the Universitas Gadjah Mada seismic monitoring facilities and the institutions providing reference catalogue information used for event validation.
+---
 
 27. License
 
@@ -648,6 +667,8 @@ LICENSE
 
 for the complete license terms.
 
+---
+
 ## 28. Disclaimer
 
 This repository is provided for research and educational purposes.
@@ -655,6 +676,7 @@ This repository is provided for research and educational purposes.
 The example or synthetic data included in the repository are intended to demonstrate software execution and do not represent the complete original seismic dataset used in the study.
 
 The authors do not guarantee that the software will perform identically on seismic data acquired from different instruments, array geometries, volcanic environments, or observation periods without appropriate adaptation and validation.
+---
 
 ##29. Contact
 
