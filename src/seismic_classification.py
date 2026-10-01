@@ -90,32 +90,10 @@ from xgboost import XGBClassifier
 
 
 # ===========================================================================
-# KOORDINAT STASIUN DEFAULT (Merapi Array)
-# Dapat di-override via argumen --station_coords (JSON string atau path file)
+# DATASET / LABEL CONFIGURATION
 # ===========================================================================
-DEFAULT_STATION_COORDS = {
-    "RE5DE": (-7.692254, 110.438530),
-    "R6940": (-7.692179, 110.441112),
-    "R265F": (-7.694289, 110.438976),
-    "R7D17": (-7.693931, 110.441316),
-    "R0279": (-7.691258, 110.440031)
-}
 
-# Stasiun referensi untuk ekstraksi fitur statistik/spektral SATU stasiun
-# (Mean, Std, ..., SpectralEntropy — lihat extract_features_from_trace()).
-# TIDAK dipakai lagi oleh FK Analysis/Beamforming (fk_grid_search() dan
-# beamforming() memakai SEMUA stasiun yang tersedia relatif terhadap
-# centroid array, tidak di-anchor ke satu stasiun referensi).
 REFERENCE_STATION = "R0279"
-
-# Konversi derajat lintang → km (rata-rata Bumi, ~111.32 km/derajat).
-# Dipakai fk_grid_search() & beamforming() untuk mengubah koordinat stasiun
-# (lat, lon) menjadi koordinat lokal East-North dalam km, supaya Slowness
-# bersatuan detik/km (standar seismologi). Konversi derajat bujur → km ikut
-# dikalikan cos(latitude) karena jarak per derajat bujur menyempit
-# mendekati kutub (untuk Merapi ~ -7.69°, faktor ini ~0.991 — kecil tapi
-# tetap diperhitungkan untuk kebenaran).
-KM_PER_DEGREE_LAT = 111.32
 
 # Label kelas seismik yang valid (nama subfolder di dalam data_dir)
 VALID_LABELS = ["Multiphase", "Rockfall", "VTB", "NonEvent"]
@@ -136,647 +114,6 @@ TEST_SIZE = 0.4
 # agar model dilatih pada domain sinyal yang identik dengan domain sinyal saat
 # prediksi (instrument-corrected), bukan raw counts.
 
-# ===========================================================================
-# FK ANALYSIS & BEAMFORMING — v3 (GRID SEARCH)
-# ===========================================================================
-# Menggantikan pendekatan sebelumnya (cross-correlation antar stasiun +
-# least-squares terhadap SATU stasiun referensi). Update dari pembimbing:
-# sekarang FK dilakukan lewat GRID SEARCH langsung atas (Back-Azimuth,
-# Slowness) — untuk tiap kombinasi kandidat, hitung normalized delay-and-sum
-# beam power (semblance) dengan delay TEORITIS (bukan hasil cross-correlation
-# yang rawan macet di skala amplitudo kecil), lalu ambil kombinasi yang
-# memaksimalkan beam power. Tidak lagi bergantung pada satu stasiun referensi
-# (REFERENCE_STATION) untuk FK — semua stasiun yang lolos dipakai relatif
-# terhadap titik tengah (centroid) array.
-#
-# Back_Azimuth dan Slowness sekarang dihitung oleh fk_grid_search(), dan
-# Beam_Power oleh beamforming() pada kombinasi optimum hasil grid search
-# tsb. (lihat run_feature_extraction / run_feature_extraction_predict).
-
-def _prepare_array_traces(stream, station_coords):
-    """
-    Prepare 3–5 station traces for array FK processing.
-
-    Dataset-specific rule:
-      - station code is expected in trace.stats.station
-      - minimum 3 stations are required
-      - common time interval is used
-      - sampling rate must be consistent
-      - each station is RMS-normalized
-    """
-
-    selected = []
-
-    for tr in stream:
-        sta = str(tr.stats.station).strip()
-
-        if sta not in station_coords:
-            continue
-
-        if tr.stats.npts < 20:
-            continue
-
-        selected.append(tr.copy())
-
-    # ---------------------------------------------------------------
-    # Remove duplicate station codes.
-    # Keep the longest trace.
-    # ---------------------------------------------------------------
-
-    best = {}
-
-    for tr in selected:
-        sta = str(tr.stats.station).strip()
-
-        if (
-            sta not in best
-            or tr.stats.npts > best[sta].stats.npts
-        ):
-            best[sta] = tr
-
-    selected = list(best.values())
-
-    # Minimum 3 stations for 2-D array processing
-    if len(selected) < 3:
-        return None
-
-    # ---------------------------------------------------------------
-    # Common time interval
-    # ---------------------------------------------------------------
-
-    common_start = max(
-        tr.stats.starttime
-        for tr in selected
-    )
-
-    common_end = min(
-        tr.stats.endtime
-        for tr in selected
-    )
-
-    if common_end <= common_start:
-        return None
-
-    # ---------------------------------------------------------------
-    # Sampling rate
-    # ---------------------------------------------------------------
-
-    fs_values = [
-        float(tr.stats.sampling_rate)
-        for tr in selected
-    ]
-
-    fs = min(fs_values)
-
-    if fs <= 0:
-        return None
-
-    # ---------------------------------------------------------------
-    # Prepare each station
-    # ---------------------------------------------------------------
-
-    data = []
-    coords = []
-    stations = []
-
-    for tr in selected:
-
-        try:
-
-            tr.trim(
-                common_start,
-                common_end,
-                pad=False
-            )
-
-            if abs(
-                float(tr.stats.sampling_rate) - fs
-            ) > 1e-6:
-
-                tr.resample(fs)
-
-            x = np.asarray(
-                tr.data,
-                dtype=float
-            )
-
-            if len(x) < 20:
-                continue
-
-            x = np.nan_to_num(
-                x,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0
-            )
-
-            # Remove DC component
-            x = x - np.mean(x)
-
-            # -------------------------------------------------------
-            # RMS normalization
-            # -------------------------------------------------------
-
-            rms = np.sqrt(
-                np.mean(x ** 2)
-            )
-
-            if (
-                not np.isfinite(rms)
-                or rms <= 0
-            ):
-                continue
-
-            x = x / rms
-
-            data.append(x)
-
-            coords.append(
-                station_coords[
-                    str(tr.stats.station).strip()
-                ]
-            )
-
-            stations.append(
-                str(tr.stats.station).strip()
-            )
-
-        except Exception:
-            continue
-
-    if len(data) < 3:
-        return None
-
-    # Same number of samples
-    n = min(
-        len(x)
-        for x in data
-    )
-
-    data = np.asarray(
-        [x[:n] for x in data],
-        dtype=float
-    )
-
-    coords = np.asarray(
-        coords,
-        dtype=float
-    )
-
-    return (
-        data,
-        coords,
-        fs,
-        stations
-    )
-
-
-# ============================================================================
-# ACTIVE FK WINDOW
-# ============================================================================
-
-def _extract_fk_window(
-    data,
-    fs,
-    window_seconds=30.0
-):
-    """
-    Select a common active window for FK.
-
-    Window selection uses:
-        median absolute amplitude across stations
-        + 1-second smoothing
-
-    The purpose is to focus FK on the active event rather than
-    the complete 120-s interval dominated by noise/coda.
-    """
-
-    n = data.shape[1]
-
-    if n <= 0:
-        return data
-
-    win = int(
-        round(
-            window_seconds * fs
-        )
-    )
-
-    if (
-        win <= 0
-        or n <= win
-    ):
-        return data
-
-    # ---------------------------------------------------------------
-    # Median envelope across stations
-    # ---------------------------------------------------------------
-
-    envelope = np.median(
-        np.abs(data),
-        axis=0
-    )
-
-    # ---------------------------------------------------------------
-    # Smooth with approximately 1-second moving average
-    # ---------------------------------------------------------------
-
-    smooth = max(
-        1,
-        int(round(1.0 * fs))
-    )
-
-    if smooth > 1:
-
-        kernel = (
-            np.ones(
-                smooth
-            )
-            / smooth
-        )
-
-        envelope = np.convolve(
-            envelope,
-            kernel,
-            mode="same"
-        )
-
-    # ---------------------------------------------------------------
-    # Center of active window
-    # ---------------------------------------------------------------
-
-    center = int(
-        np.argmax(envelope)
-    )
-
-    half = win // 2
-
-    i0 = max(
-        0,
-        center - half
-    )
-
-    i1 = min(
-        n,
-        i0 + win
-    )
-
-    if i1 - i0 < win:
-
-        i0 = max(
-            0,
-            i1 - win
-        )
-
-    return data[
-        :,
-        i0:i1
-    ]
-
-
-# ============================================================================
-# FRACTIONAL DELAY / FOURIER PHASE SHIFT
-# ============================================================================
-
-def _fractional_shift(
-    x,
-    shift_samples
-):
-    """
-    Fractional delay using Fourier phase shifting.
-
-    Positive shift_samples corresponds to x(t + delay).
-    """
-
-    n = len(x)
-
-    if (
-        n < 4
-        or abs(shift_samples) < 1e-9
-    ):
-        return x.copy()
-
-    # Positive-frequency axis in cycles/sample
-    freqs = np.fft.rfftfreq(n)
-
-    # Fourier transform
-    spec = np.fft.rfft(x)
-
-    # ---------------------------------------------------------------
-    # Phase shift
-    # ---------------------------------------------------------------
-
-    phase = np.exp(
-        2j
-        * np.pi
-        * freqs
-        * shift_samples
-    )
-
-    # Apply phase shift + inverse FFT
-    y = np.fft.irfft(
-        spec * phase,
-        n=n
-    )
-
-    return y
-
-
-# ============================================================================
-# NORMALIZED DELAY-AND-SUM BEAM POWER
-# ============================================================================
-
-def _beam_score(
-    data, coords_xy, fs, azimuth_deg, slowness_s_per_km,
-    return_beam=False
-):
-    """
-    Normalized delay-and-sum beam power for one (Back-Azimuth, Slowness)
-    hypothesis. If return_beam=True, also returns the beamformed waveform.
-    """
-    if data.shape[0] < 3 or slowness_s_per_km <= 0:
-        return (np.nan, None) if return_beam else np.nan
-
-    az = np.deg2rad(float(azimuth_deg))
-
-    # Propagation direction is opposite to Back-Azimuth.
-    prop_e = np.sin(az + np.pi)
-    prop_n = np.cos(az + np.pi)
-    svec = slowness_s_per_km * np.array([prop_e, prop_n])
-
-    center = np.mean(coords_xy, axis=0)
-    rel = coords_xy - center
-
-    # Theoretical time delay tau_i = r_i dot s
-    delays = rel @ svec
-    delay_samples = delays * fs
-
-    aligned = np.asarray([
-        _fractional_shift(data[i], delay_samples[i])
-        for i in range(data.shape[0])
-    ])
-
-    # One representative array waveform.
-    beam = np.mean(aligned, axis=0)
-
-    # Normalized coherent beam power.
-    raw_power = np.mean(beam ** 2)
-    denom = np.mean(np.mean(aligned ** 2, axis=1)) + 1e-12
-    normalized_power = float(raw_power / denom)
-
-    if return_beam:
-        return normalized_power, beam
-    return normalized_power
-# ============================================================================
-# DIRECT FK GRID SEARCH
-# ============================================================================
-
-def fk_grid_search(
-    stream,
-    station_coords,
-    azimuth_step=2.0,
-    slowness_min=0.01,
-    slowness_max=1.50,
-    slowness_step=0.02,
-    window_seconds=30.0
-):
-    """
-    Direct FK grid search.
-
-    Tidak memakai cross-correlation threshold.
-
-    Yang dicari adalah pasangan:
-
-        (Back-Azimuth, Slowness)
-
-    yang memberikan normalized delay-and-sum beam power maksimum.
-
-    Minimal 3 stasiun.
-    """
-
-    # ---------------------------------------------------------------
-    # 1. Prepare array traces
-    # ---------------------------------------------------------------
-
-    prepared = _prepare_array_traces(
-        stream,
-        station_coords
-    )
-
-    if prepared is None:
-        return (
-            np.nan,
-            np.nan,
-            np.nan
-        )
-
-    data, coords_geo, fs, stations = (
-        prepared
-    )
-
-    # ---------------------------------------------------------------
-    # 2. Geographic coordinates -> local EN coordinates in km
-    # ---------------------------------------------------------------
-
-    lat = coords_geo[:, 0]
-    lon = coords_geo[:, 1]
-
-    lat0 = np.mean(lat)
-    lon0 = np.mean(lon)
-
-    x = (
-        (lon - lon0)
-        * KM_PER_DEGREE_LAT
-        * np.cos(
-            np.deg2rad(lat0)
-        )
-    )
-
-    y = (
-        (lat - lat0)
-        * KM_PER_DEGREE_LAT
-    )
-
-    coords_xy = np.column_stack(
-        (
-            x,
-            y
-        )
-    )
-
-    # ---------------------------------------------------------------
-    # 3. Check 2-D geometry
-    # ---------------------------------------------------------------
-
-    if (
-        np.linalg.matrix_rank(
-            coords_xy
-            - np.mean(
-                coords_xy,
-                axis=0
-            )
-        )
-        < 2
-    ):
-        return (
-            np.nan,
-            np.nan,
-            np.nan
-        )
-
-    # ---------------------------------------------------------------
-    # 4. Select active FK window
-    # ---------------------------------------------------------------
-
-    data_fk = _extract_fk_window(
-        data,
-        fs,
-        window_seconds
-    )
-
-    if (
-        data_fk.shape[1]
-        < max(
-            20,
-            int(fs)
-        )
-    ):
-        return (
-            np.nan,
-            np.nan,
-            np.nan
-        )
-
-    # ---------------------------------------------------------------
-    # 5. Initialize optimum
-    # ---------------------------------------------------------------
-
-    best_power = -np.inf
-    best_baz = np.nan
-    best_slow = np.nan
-
-    # ---------------------------------------------------------------
-    # 6. Define grid
-    # ---------------------------------------------------------------
-
-    azimuths = np.arange(
-        0.0,
-        360.0,
-        float(azimuth_step)
-    )
-
-    slownesses = np.arange(
-        float(slowness_min),
-        float(slowness_max)
-        + 0.5 * float(slowness_step),
-        float(slowness_step)
-    )
-
-    # ---------------------------------------------------------------
-    # 7. Direct exhaustive search
-    # ---------------------------------------------------------------
-
-    for slow in slownesses:
-
-        for baz in azimuths:
-
-            score = _beam_score(
-                data_fk,
-                coords_xy,
-                fs,
-                baz,
-                slow
-            )
-
-            if (
-                np.isfinite(score)
-                and score > best_power
-            ):
-
-                best_power = score
-                best_baz = float(
-                    baz
-                )
-                best_slow = float(
-                    slow
-                )
-
-    # ---------------------------------------------------------------
-    # 8. Return optimum
-    # ---------------------------------------------------------------
-
-    if not np.isfinite(
-        best_power
-    ):
-        return (
-            np.nan,
-            np.nan,
-            np.nan
-        )
-
-    return (
-        best_baz,
-        best_slow,
-        float(best_power)
-    )
-
-
-# ============================================================================
-# FINAL BEAMFORMING AT FK OPTIMUM
-# ============================================================================
-
-def beamforming(
-    stream, station_coords, baz, slowness,
-    window_seconds=30.0, return_waveform=True
-):
-    """
-    Final delay-and-sum beamforming at the optimum FK solution.
-
-    return_waveform=True:
-        returns (beam_waveform, beam_power, sampling_rate)
-
-    return_waveform=False:
-        returns beam_power only.
-    """
-    if not (
-        np.isfinite(baz)
-        and np.isfinite(slowness)
-        and slowness > 0
-    ):
-        return (None, np.nan, np.nan) if return_waveform else np.nan
-
-    prepared = _prepare_array_traces(stream, station_coords)
-    if prepared is None:
-        return (None, np.nan, np.nan) if return_waveform else np.nan
-
-    data, coords_geo, fs, stations = prepared
-
-    lat = coords_geo[:, 0]
-    lon = coords_geo[:, 1]
-    lat0 = np.mean(lat)
-    lon0 = np.mean(lon)
-
-    x = (
-        (lon - lon0)
-        * KM_PER_DEGREE_LAT
-        * np.cos(np.deg2rad(lat0))
-    )
-    y = (lat - lat0) * KM_PER_DEGREE_LAT
-    coords_xy = np.column_stack((x, y))
-
-    # Exactly the same active window used by FK grid search.
-    data_fk = _extract_fk_window(data, fs, window_seconds)
-
-    if data_fk.shape[1] < max(20, int(fs)):
-        return (None, np.nan, fs) if return_waveform else np.nan
-
-    power, beam = _beam_score(
-        data_fk, coords_xy, fs, baz, slowness, return_beam=True
-    )
-
-    if return_waveform:
-        return beam, power, fs
-    return power
 def extract_features_from_trace(trace):
     """
     Ekstrak fitur statistik dan spektral dari satu trace.
@@ -1092,40 +429,46 @@ def _discover_labeled_mseed_events(data_dir, valid_labels):
     return groups, all_mseed, sorted(label_dirs_found)
 
 
-def run_feature_extraction(
-    data_dir, output_csv, station_coords, valid_labels=None, use_fk=True
-):
+def _select_feature_trace(stream, preferred_station=REFERENCE_STATION):
+    """Pilih satu trace untuk ekstraksi fitur temporal/spektral.
+
+    Prioritas diberikan kepada stasiun referensi R0279 jika tersedia.
+    Jika tidak tersedia, trace pertama yang valid digunakan.
+    Tidak ada FK, beamforming, stacking, atau fitur spasial pada tahap ini.
     """
-    FEATURE EXTRACTION BERBASIS WAVEFORM HASIL BEAMFORMING.
+    if len(stream) == 0:
+        return None
 
-    Multi-station waveform
-        -> preprocessing
-        -> FK grid search
-        -> BAZ + Slowness optimum
-        -> delay-and-sum
-        -> satu waveform BEAM
-        -> 11 fitur temporal/spektral
+    for tr in stream:
+        if str(tr.stats.station).strip() == preferred_station:
+            return tr.copy()
 
-    Dengan fitur spasial:
-        11 + Back_Azimuth + Slowness + Beam_Power = 14 fitur.
+    return stream[0].copy()
 
-    Tanpa fitur spasial:
-        11 fitur temporal/spektral dari waveform BEAM.
 
-    Penting:
-        fungsi ini sekarang melakukan validasi jumlah file/event sebelum
-        training sehingga CSV kosong tidak diteruskan ke train_test_split.
+def run_feature_extraction(
+    data_dir, output_csv, station_coords=None, valid_labels=None
+):
+    """Ekstraksi 11 fitur temporal/spektral tanpa FK dan beamforming.
+
+    Alur:
+        multi-station event -> preprocessing -> satu trace referensi
+        -> 11 fitur temporal/spektral.
+
+    Fitur output:
+        Mean, Std, Skewness, Kurtosis, RMS, Peak, Energy, Zero_Cross,
+        Dominant_Freq, SpectralCentroid, SpectralEntropy.
     """
     if valid_labels is None:
         valid_labels = VALID_LABELS
 
     print("=" * 64)
-    print("TAHAP 1: FEATURE EXTRACTION — ARRAY BEAMFORMING")
+    print("TAHAP 1: FEATURE EXTRACTION — NO ARRAY PROCESSING")
     print("=" * 64)
     print(f"  Folder data : {os.path.abspath(data_dir)}")
     print(f"  Label dicari: {valid_labels}")
-    print("  Sinyal dasar: 1 waveform hasil beamforming")
-    print("  Fitur output: 14 fitur (11 + 3 spasial)")
+    print(f"  Trace fitur : {REFERENCE_STATION} jika tersedia")
+    print("  Fitur output: 11 fitur temporal/spektral")
     print()
 
     if not os.path.isdir(data_dir):
@@ -1139,36 +482,23 @@ def run_feature_extraction(
 
     print(f"  Total file waveform ditemukan : {len(all_mseed)}")
     print(f"  Folder kelas terdeteksi       : {found_labels}")
-    print(
-        "  Total grup event terdeteksi  : "
-        f"{sum(len(v) for v in groups.values())}"
-    )
+    print(f"  Total grup event terdeteksi  : {sum(len(v) for v in groups.values())}")
 
     if not all_mseed:
-        # Diagnostic: tampilkan struktur folder tingkat atas.
-        top_dirs = []
-        for name in sorted(os.listdir(data_dir)):
-            p = os.path.join(data_dir, name)
-            if os.path.isdir(p):
-                top_dirs.append(name)
-
+        top_dirs = [
+            name for name in sorted(os.listdir(data_dir))
+            if os.path.isdir(os.path.join(data_dir, name))
+        ]
         print("\n[ERROR] Tidak ada file waveform yang masuk ke label valid.")
         print(f"  Folder tingkat atas: {top_dirs}")
         print(f"  Label yang dicari  : {list(valid_labels)}")
-        print(
-            "\n  Jika nama folder kelas berbeda, jalankan kembali dengan "
-            "--labels sesuai nama folder kelas di data_training."
-        )
         return pd.DataFrame()
 
     all_features, file_names, labels = [], [], []
     total_events = sum(len(v) for v in groups.values())
     processed = 0
-    skipped_read = 0
     skipped_station = 0
     skipped_preprocess = 0
-    skipped_fk = 0
-    skipped_beam = 0
 
     for label in valid_labels:
         if label not in groups:
@@ -1176,159 +506,184 @@ def run_feature_extraction(
 
         for event_id, files in groups[label].items():
             processed += 1
-
             st_raw = Stream()
             for f in files:
                 try:
                     st_raw += read(f)
                 except Exception as e:
-                    print(
-                        f"  [WARN] Gagal membaca {os.path.basename(f)}: {e}"
-                    )
+                    print(f"  [WARN] Gagal membaca {os.path.basename(f)}: {e}")
 
-            if len(st_raw) < 3:
+            if len(st_raw) == 0:
                 skipped_station += 1
-                print(
-                    f"  [SKIP {processed}/{total_events}] {label}/{event_id}: "
-                    f"{len(st_raw)} trace terbaca (<3)."
-                )
+                print(f"  [SKIP {processed}/{total_events}] {label}/{event_id}: tidak ada trace.")
                 continue
 
             try:
                 st = preprocess_stream_per_event(st_raw)
             except Exception as e:
                 skipped_preprocess += 1
-                print(
-                    f"  [SKIP {processed}/{total_events}] {label}/{event_id}: "
-                    f"preprocessing error: {e}"
-                )
+                print(f"  [SKIP {processed}/{total_events}] {label}/{event_id}: preprocessing error: {e}")
                 continue
 
-            if len(st) < 3:
+            if len(st) == 0:
                 skipped_preprocess += 1
-                print(
-                    f"  [SKIP {processed}/{total_events}] {label}/{event_id}: "
-                    f"setelah preprocessing hanya {len(st)} trace (<3)."
-                )
+                print(f"  [SKIP {processed}/{total_events}] {label}/{event_id}: tidak ada trace setelah preprocessing.")
                 continue
 
-            # FK grid search.
-            baz, slowness, fk_power = fk_grid_search(
-                st, station_coords
-            )
-
-            if not (
-                np.isfinite(baz)
-                and np.isfinite(slowness)
-                and np.isfinite(fk_power)
-            ):
-                skipped_fk += 1
-                print(
-                    f"  [SKIP {processed}/{total_events}] {label}/{event_id}: "
-                    "FK gagal."
-                )
+            trace = _select_feature_trace(st)
+            if trace is None or len(trace.data) < 10:
+                skipped_station += 1
+                print(f"  [SKIP {processed}/{total_events}] {label}/{event_id}: trace fitur tidak valid.")
                 continue
 
-            # Final beamforming pada BAZ/slowness optimum.
-            beam, beam_power, beam_fs = beamforming(
-                st,
-                station_coords,
-                baz,
-                slowness,
-                return_waveform=True,
-            )
-
-            if (
-                beam is None
-                or len(beam) < 10
-                or not np.isfinite(beam_power)
-                or not np.isfinite(beam_fs)
-                or beam_fs <= 0
-            ):
-                skipped_beam += 1
-                print(
-                    f"  [SKIP {processed}/{total_events}] {label}/{event_id}: "
-                    "waveform beam tidak valid."
-                )
-                continue
-
-            # Jadikan waveform beam sebagai ObsPy Trace.
-            beam_trace = st[0].copy()
-            beam_trace.data = np.asarray(beam, dtype=np.float64)
-            beam_trace.stats.sampling_rate = float(beam_fs)
-            beam_trace.stats.station = "BEAM"
-            beam_trace.stats.channel = "BEAM"
-
-            # 11 fitur dasar diekstraksi dari SATU waveform beam.
-            feat = extract_features_from_trace(beam_trace)
-
+            feat = extract_features_from_trace(trace)
             if len(feat) != 11 or not np.all(np.isfinite(feat)):
-                print(
-                    f"  [SKIP {processed}/{total_events}] {label}/{event_id}: "
-                    "fitur temporal/spektral tidak valid."
-                )
+                print(f"  [SKIP {processed}/{total_events}] {label}/{event_id}: fitur temporal/spektral tidak valid.")
                 continue
-
-            # Tiga fitur spasial.
-            feat.extend([
-                float(baz),
-                float(slowness),
-                float(beam_power),
-            ])
 
             all_features.append(feat)
             file_names.append(event_id)
             labels.append(label)
 
             if processed % 10 == 0 or processed == total_events:
-                print(
-                    f"  Proses {processed}/{total_events} | "
-                    f"berhasil={len(all_features)}"
-                )
+                print(f"  Proses {processed}/{total_events} | berhasil={len(all_features)}")
 
     columns = [
         "Mean", "Std", "Skewness", "Kurtosis",
         "RMS", "Peak", "Energy", "Zero_Cross",
         "Dominant_Freq", "SpectralCentroid", "SpectralEntropy",
-        "Back_Azimuth", "Slowness", "Beam_Power",
     ]
 
-    if len(all_features) == 0:
-        print("\n" + "=" * 64)
-        print("[ERROR] FEATURE EXTRACTION MENGHASILKAN 0 EVENT.")
-        print("=" * 64)
+    if not all_features:
+        print("\n[ERROR] FEATURE EXTRACTION MENGHASILKAN 0 EVENT.")
         print(f"  Grup event          : {total_events}")
-        print(f"  Skip <3 station     : {skipped_station}")
+        print(f"  Skip trace          : {skipped_station}")
         print(f"  Skip preprocessing  : {skipped_preprocess}")
-        print(f"  Skip FK             : {skipped_fk}")
-        print(f"  Skip beamforming    : {skipped_beam}")
-        print(
-            "\nPipeline DIHENTIKAN agar tidak meneruskan CSV kosong "
-            "ke train_test_split."
-        )
         return pd.DataFrame()
 
     df = pd.DataFrame(all_features, columns=columns)
     df.insert(0, "Event", file_names)
     df.insert(1, "Label", labels)
 
-    os.makedirs(
-        os.path.dirname(os.path.abspath(output_csv)),
-        exist_ok=True
-    )
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
     df.to_csv(output_csv, index=False)
 
     print("\n" + "=" * 64)
     print("FEATURE EXTRACTION SELESAI")
     print("=" * 64)
     print(f"  Event berhasil : {len(df)}")
-    print("  Jumlah fitur   : 14")
+    print("  Jumlah fitur   : 11")
     print("  Distribusi kelas:")
     print(df["Label"].value_counts().to_string())
     print(f"  CSV             : {os.path.abspath(output_csv)}")
     print("=" * 64)
-
     return df
+
+
+def run_feature_extraction_predict(
+    data_dir, output_csv, station_coords=None, already_cut=False
+):
+    """Ekstraksi 11 fitur temporal/spektral untuk data prediksi/blind.
+
+    Hanya menggunakan fitur temporal dan spektral; tidak ada fitur spasial array.
+    """
+    print("=" * 60)
+    print("EKSTRAKSI FITUR PREDIKSI — NO ARRAY PROCESSING")
+    print("=" * 60)
+    print(f"  Folder data  : {data_dir}")
+    print(f"  Output CSV   : {output_csv}")
+    print(f"  Trace fitur  : {REFERENCE_STATION} jika tersedia")
+    print()
+
+    all_files = []
+    for root, dirs, files in os.walk(data_dir):
+        for f in files:
+            if f.lower().endswith((".mseed", ".msd", ".seed")):
+                all_files.append(os.path.join(root, f))
+
+    if not all_files:
+        print(f"  [ERROR] Tidak ada file waveform di: {data_dir}")
+        return pd.DataFrame()
+
+    event_groups = defaultdict(list)
+    for filepath in all_files:
+        fname = os.path.basename(filepath)
+        stem = os.path.splitext(fname)[0]
+        parts_underscore = stem.split("_")
+        parts_dot = stem.split(".")
+
+        if already_cut and len(parts_underscore) >= 3 and len(parts_underscore[0]) == 8 and parts_underscore[0].isdigit():
+            event_id = "_".join(parts_underscore[:3])
+        elif len(parts_underscore) >= 2 and len(parts_underscore[0]) == 8 and parts_underscore[0].isdigit():
+            event_id = "_".join(parts_underscore[:2])
+        elif len(parts_dot) >= 2:
+            event_id = f"{parts_dot[-2]}.{parts_dot[-1]}"
+        else:
+            event_id = stem
+
+        event_groups[event_id].append(filepath)
+
+    all_features, event_names = [], []
+    total = len(event_groups)
+
+    for processed, (event_id, files) in enumerate(event_groups.items(), start=1):
+        st_raw = Stream()
+        for f in files:
+            try:
+                st_raw += read(f)
+            except Exception as e:
+                print(f"   [WARN] Gagal baca {os.path.basename(f)}: {e}")
+
+        if len(st_raw) == 0:
+            print(f"   [SKIP] {event_id} — tidak ada trace.")
+            continue
+
+        try:
+            st = (preprocess_stream_per_event(st_raw) if already_cut
+                  else preprocess_stream_for_features(st_raw))
+        except Exception as e:
+            print(f"   [SKIP] {event_id} — preprocessing gagal: {e}")
+            continue
+
+        if len(st) == 0:
+            print(f"   [SKIP] {event_id} — tidak ada trace setelah preprocessing.")
+            continue
+
+        trace = _select_feature_trace(st)
+        if trace is None or len(trace.data) < 10:
+            print(f"   [SKIP] {event_id} — trace fitur tidak valid.")
+            continue
+
+        feat = extract_features_from_trace(trace)
+        if len(feat) != 11 or not np.all(np.isfinite(feat)):
+            print(f"   [SKIP] {event_id} — fitur tidak valid.")
+            continue
+
+        all_features.append(feat)
+        event_names.append(event_id)
+
+        if processed % 10 == 0 or processed == total:
+            print(f"  Proses {processed}/{total} event...")
+
+    if not all_features:
+        print("  [ERROR] Tidak ada fitur yang berhasil diekstrak.")
+        return pd.DataFrame()
+
+    columns = [
+        "Mean", "Std", "Skewness", "Kurtosis",
+        "RMS", "Peak", "Energy", "Zero_Cross",
+        "Dominant_Freq", "SpectralCentroid", "SpectralEntropy",
+    ]
+    df = pd.DataFrame(all_features, columns=columns)
+    df.insert(0, "Event", event_names)
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
+    df.to_csv(output_csv, index=False)
+
+    print(f"  Total baris  : {len(df)}")
+    print("  Jumlah fitur : 11")
+    print(f"  CSV disimpan : {output_csv}")
+    return df
+
 # ===========================================================================
 # PREPROCESSING PIPELINE UNTUK DATA PREDIKSI
 # ===========================================================================
@@ -1359,192 +714,6 @@ _FMIN       = 0.8                       # Hz — band sinyal riil di data
 _FMAX       = 1.8                       # Hz — band sinyal riil di data
 
 
-def run_feature_extraction_predict(
-    data_dir, output_csv, station_coords, already_cut=False
-):
-    """
-    Ekstraksi fitur prediksi/blind data dengan alur yang sama:
-
-    waveform array -> preprocessing -> FK -> beamforming ->
-    satu waveform BEAM -> 11 fitur + 3 fitur spasial.
-
-    Output CSV selalu 14 fitur. Model 11-fitur akan mengambil hanya
-    11 kolom yang tersimpan pada model.
-    """
-    print("=" * 60)
-    print("EKSTRAKSI FITUR PREDIKSI — ARRAY BEAMFORMING")
-    print("=" * 60)
-    print(f"  Folder data  : {data_dir}")
-    print(f"  Output CSV   : {output_csv}")
-    print(
-        f"  Mode         : "
-        f"{'Per-Event (already cut)' if already_cut else 'Daily SEED'}"
-    )
-    print("  Sinyal dasar : waveform hasil beamforming array")
-    print()
-
-    all_files = []
-    for root, dirs, files in os.walk(data_dir):
-        for f in files:
-            if f.lower().endswith(".mseed") or (
-                "." in f
-                and not f.lower().endswith(".csv")
-                and not f.lower().endswith(".txt")
-            ):
-                all_files.append(os.path.join(root, f))
-
-    if not all_files:
-        print(f"  [ERROR] Tidak ada file .mseed di: {data_dir}")
-        return pd.DataFrame()
-
-    print(f"  Total file ditemukan: {len(all_files)}")
-
-    event_groups = defaultdict(list)
-
-    for filepath in all_files:
-        fname = os.path.basename(filepath)
-        parts_underscore = fname.split("_")
-        parts_dot = fname.replace(".mseed", "").split(".")
-
-        if already_cut:
-            if (
-                len(parts_underscore) >= 4
-                and len(parts_underscore[0]) == 8
-                and parts_underscore[0].isdigit()
-            ):
-                event_id = "_".join(parts_underscore[:3])
-            elif len(parts_dot) >= 7:
-                event_id = f"{parts_dot[-2]}.{parts_dot[-1]}"
-            else:
-                event_id = fname.replace(".mseed", "")
-        else:
-            if (
-                len(parts_underscore) >= 3
-                and len(parts_underscore[0]) == 8
-            ):
-                event_id = "_".join(parts_underscore[:3])
-            elif len(parts_dot) >= 7:
-                event_id = f"{parts_dot[-2]}.{parts_dot[-1]}"
-            elif len(parts_dot) >= 2:
-                event_id = f"{parts_dot[-2]}.{parts_dot[-1]}"
-            else:
-                event_id = fname
-
-        event_groups[event_id].append(filepath)
-
-    print(f"  Total event (grup): {len(event_groups)}")
-    print()
-
-    all_features, event_names = [], []
-    total = len(event_groups)
-    processed = 0
-
-    preproc_fn = (
-        preprocess_stream_per_event
-        if already_cut
-        else preprocess_stream_for_features
-    )
-
-    for event_id, files in event_groups.items():
-
-        st_raw = Stream()
-        for f in files:
-            try:
-                st_raw += read(f)
-            except Exception as e:
-                print(f"   [WARN] Gagal baca {os.path.basename(f)}: {e}")
-
-        if len(st_raw) < 3:
-            print(f"   [SKIP] {event_id} — minimal 3 trace diperlukan.")
-            processed += 1
-            continue
-
-        st = preproc_fn(st_raw)
-
-        if len(st) < 3:
-            print(f"   [SKIP] {event_id} — setelah preprocessing <3 trace.")
-            processed += 1
-            continue
-
-        baz, slowness, fk_power = fk_grid_search(st, station_coords)
-
-        if not (
-            np.isfinite(baz)
-            and np.isfinite(slowness)
-            and np.isfinite(fk_power)
-        ):
-            print(f"   [SKIP] {event_id} — FK gagal.")
-            processed += 1
-            continue
-
-        beam, beam_power, beam_fs = beamforming(
-            st,
-            station_coords,
-            baz,
-            slowness,
-            return_waveform=True,
-        )
-
-        if (
-            beam is None
-            or len(beam) < 10
-            or not np.isfinite(beam_power)
-            or not np.isfinite(beam_fs)
-            or beam_fs <= 0
-        ):
-            print(f"   [SKIP] {event_id} — waveform beam tidak valid.")
-            processed += 1
-            continue
-
-        beam_trace = st[0].copy()
-        beam_trace.data = np.asarray(beam, dtype=np.float64)
-        beam_trace.stats.sampling_rate = float(beam_fs)
-        beam_trace.stats.station = "BEAM"
-        beam_trace.stats.channel = "BEAM"
-
-        feat = extract_features_from_trace(beam_trace)
-
-        if len(feat) != 11:
-            print(f"   [SKIP] {event_id} — fitur dasar bukan 11.")
-            processed += 1
-            continue
-
-        feat.extend([
-            float(baz),
-            float(slowness),
-            float(beam_power),
-        ])
-
-        all_features.append(feat)
-        event_names.append(event_id)
-
-        processed += 1
-        if processed % 10 == 0 or processed == total:
-            print(f"  Proses {processed}/{total} event...")
-
-    if not all_features:
-        print("  [ERROR] Tidak ada fitur yang berhasil diekstrak.")
-        return pd.DataFrame()
-
-    columns = [
-        "Mean", "Std", "Skewness", "Kurtosis",
-        "RMS", "Peak", "Energy", "Zero_Cross",
-        "Dominant_Freq", "SpectralCentroid", "SpectralEntropy",
-        "Back_Azimuth", "Slowness", "Beam_Power",
-    ]
-
-    df = pd.DataFrame(all_features, columns=columns)
-    df.insert(0, "Event", event_names)
-
-    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
-    df.to_csv(output_csv, index=False)
-
-    print()
-    print(f"  Total baris : {len(df)}")
-    print("  Jumlah fitur: 14")
-    print(f"✅ CSV disimpan: {output_csv}")
-
-    return df
 # ===========================================================================
 # TAHAP 2 — MODEL TRAINING (SVM + XGBoost + SMOTE + GridSearchCV)
 # ===========================================================================
@@ -1608,16 +777,16 @@ def build_pipelines(n_classes):
     ])
 
     svm_grid = {
-        "model__C":     [0.1, 1, 10],
-        "model__gamma": ["scale", "auto"],
+        "model_C":     [0.1, 1, 10],
+        "model_gamma": ["scale", "auto"],
     }
 
     xgb_grid = {
-        "model__n_estimators":     [200, 400],
-        "model__max_depth":        [4, 6, 8],
-        "model__learning_rate":    [0.05, 0.1],
-        "model__subsample":        [0.8, 1.0],
-        "model__colsample_bytree": [0.8, 1.0],
+        "model_n_estimators":     [200, 400],
+        "model_max_depth":        [4, 6, 8],
+        "model_learning_rate":    [0.05, 0.1],
+        "model_subsample":        [0.8, 1.0],
+        "model_colsample_bytree": [0.8, 1.0],
     }
 
     return svm_pipe, xgb_pipe, svm_grid, xgb_grid
@@ -1625,7 +794,7 @@ def build_pipelines(n_classes):
 
 def run_training(output_csv, model_output, test_size=TEST_SIZE, random_state=42,
                   blind_size=0.0, blind_seed=99, data_dir=None, output_plots=None,
-                  tag=None, use_fk=True):
+                  tag=None):
     """
     Melatih model SVM dan XGBoost dengan GridSearchCV + StratifiedKFold.
 
@@ -1682,13 +851,6 @@ def run_training(output_csv, model_output, test_size=TEST_SIZE, random_state=42,
     tag          : str | None
         Nama split untuk penamaan file plot (mis. "split_60_40"). Default:
         nama folder terakhir dari model_output.
-    use_fk       : bool
-        True (default): pakai semua kolom numerik di CSV apa adanya. False:
-        kolom Back_Azimuth/Slowness/Beam_Power (jika ada di CSV) DIBUANG
-        sebelum training — berguna kalau CSV diekstrak dengan use_fk=True
-        tapi Anda ingin membandingkan model dengan/tanpa fitur FK tanpa
-        ekstraksi ulang.
-
     Return
     ------
     tuple (results_dict, label_encoder, feature_cols, X_test, y_test)
@@ -1740,12 +902,6 @@ def run_training(output_csv, model_output, test_size=TEST_SIZE, random_state=42,
 
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-    FK_COLS = ["Back_Azimuth", "Slowness", "Beam_Power"]
-    if not use_fk:
-        dropped = [c for c in FK_COLS if c in num_cols]
-        num_cols = [c for c in num_cols if c not in FK_COLS]
-        if dropped:
-            print(f"  [no_fk] Kolom dibuang dari training: {dropped}")
 
     X        = df[num_cols].copy()
     y        = df["Label"].copy()
@@ -2853,7 +2009,7 @@ def plot_data_distribution_2(df, feature_cols, class_col, output_dir, level_name
     # ===== FIGURE 3: Korelasi SEMUA fitur + PCA =====
     # Gunakan SEMUA fitur yang tersedia (bukan top-12 hardcoded)
     # → Saat FK nonaktif  : 11 fitur
-    # → Saat FK aktif     : 14 fitur (+ Back_Azimuth, Slowness, Beam_Power)
+    
     # → Jika ada tambahan : otomatis ikut tampil
     all_feat_cols = feature_cols   # tidak di-slice, pakai semua
 
@@ -3240,7 +2396,7 @@ def save_confusion_matrix_examples(
     Struktur Output
     ---------------
     output_dir/confusion_examples_{tag}/{model_name}/
-    ├── True_{label_asli}__Pred_{label_prediksi}/{event}.png   (hingga n_examples)
+    ├── True_{label_asli}_Pred_{label_prediksi}/{event}.png   (hingga n_examples)
     └── confusion_matrix_waveforms_{model_name}_{tag}.png       (grid ringkasan)
 
     Parameter
@@ -3299,7 +2455,7 @@ def save_confusion_matrix_examples(
             rng.shuffle(events)
             chosen = events[:n_examples]
 
-            cell_dir = os.path.join(model_dir, f"True_{true_cls}__Pred_{pred_cls}")
+            cell_dir = os.path.join(model_dir, f"True_{true_cls}_Pred_{pred_cls}")
 
             for i, event_id in enumerate(chosen):
                 direct = os.path.join(data_dir, true_cls, f"{event_id}_{station}.mseed")
@@ -3467,7 +2623,7 @@ def run_evaluation(output_csv, model_output, output_plots, test_size=None, rando
     Confusion matrix sebagai SINYAL (hanya jika data_dir diisi — masukan
     dosen pembimbing: "tampilkan prediksi sinyal kayak apa kalau dilihat
     matriks confusion"). Lihat save_confusion_matrix_examples():
-    - confusion_examples_{tag}/{model}/True_{asli}__Pred_{prediksi}/{event}.png
+    - confusion_examples_{tag}/{model}/True_{asli}_Pred_{prediksi}/{event}.png
       → contoh waveform+spektrum per sel confusion matrix test set,
         termasuk sel misklasifikasi.
     - confusion_matrix_waveforms_{model}_{tag}.png
@@ -3593,7 +2749,7 @@ def run_evaluation(output_csv, model_output, output_plots, test_size=None, rando
         try:
             _bp[name] = {
                 k: v for k, v in model.get_params().items()
-                if k.startswith("model__") and v is not None
+                if k.startswith("model_") and v is not None
             }
         except Exception:
             _bp[name] = {}
@@ -4343,7 +3499,7 @@ def run_blind_new_all(
 
     Subfolder yang valid harus:
       - Berisi file seismic_models.joblib
-      - Namanya mengandung kata "split" (misal: split_60_40_no_fk)
+      - Namanya mengandung kata "split" (misal: split_60_40)
 
     Alur
     ----
@@ -4404,8 +3560,8 @@ def run_blind_new_all(
               f"di: {base_model_output}")
         print("  Pastikan struktur folder:")
         print("    base_model_output/")
-        print("    ├── split_60_40_no_fk/seismic_models.joblib")
-        print("    ├── split_70_30_no_fk/seismic_models.joblib")
+        print("    ├── split_60_40/seismic_models.joblib")
+        print("    ├── split_70_30/seismic_models.joblib")
         print("    └── ...")
         sys.exit(1)
 
@@ -4731,153 +3887,81 @@ def run_all_splits(
     blind_size=0.0,
     blind_seed=99,
     data_dir=None,
-    use_fk=True,
 ):
-    """
-    Menjalankan SEMUA skenario ML:
+    """Jalankan training dan evaluasi 11 fitur temporal/spektral.
 
-      A. Dengan fitur spasial array = 14 fitur
-         11 temporal/spektral + Back_Azimuth + Slowness + Beam_Power
-
-      B. Tanpa fitur spasial array = 11 fitur
-         11 temporal/spektral saja
-
-    Untuk masing-masing skenario dijalankan:
-      60:40, 70:30, 80:20, 90:10
-      -> training SVM-RBF
-      -> training XGBoost
-      -> evaluasi
-      -> penyimpanan model, plot, report
+    Skenario split: 60:40, 70:30, 80:20, dan 90:10.
+    Model: SVM-RBF dan XGBoost.
+    Tidak ada FK, beamforming, atau fitur spasial array.
     """
     if splits is None:
         splits = SPLIT_SCENARIOS
 
-    # Jika fungsi dipanggil langsung dengan use_fk=False, tetap jalankan
-    # hanya skenario 11 fitur untuk kompatibilitas.
-    scenarios = [True, False] if use_fk else [False]
-
     summary_rows = []
+    os.makedirs(base_output_plots, exist_ok=True)
 
-    for scenario_fk in scenarios:
+    for test_size in splits:
+        train_pct = int(round((1 - test_size) * 100))
+        test_pct = int(round(test_size * 100))
+        tag = f"split_{train_pct}_{test_pct}"
 
-        scenario_name = "WITH_ARRAY_14_FEATURES" if scenario_fk else "NO_SPATIAL_11_FEATURES"
-        scenario_suffix = "" if scenario_fk else "_no_fk"
-
-        scenario_model_root = base_model_output
-        scenario_plot_root = base_output_plots
+        model_dir = os.path.join(base_model_output, tag)
+        plots_dir = os.path.join(base_output_plots, tag)
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(plots_dir, exist_ok=True)
 
         print()
-        print("╔" + "═" * 60 + "╗")
-        print(
-            "║  SKENARIO: "
-            + (
-                "14 FITUR — TEMPORAL/SPEKTRAL + SPASIAL ARRAY"
-                if scenario_fk
-                else
-                "11 FITUR — TEMPORAL/SPEKTRAL TANPA FITUR SPASIAL"
-            ).ljust(60)
-            + "║"
+        print("=" * 64)
+        print(f"11 FITUR TEMPORAL/SPEKTRAL — SPLIT {train_pct}/{test_pct}")
+        print("=" * 64)
+
+        run_training(
+            output_csv=output_csv,
+            model_output=model_dir,
+            test_size=test_size,
+            random_state=random_state,
+            blind_size=blind_size,
+            blind_seed=blind_seed,
+            data_dir=data_dir,
+            output_plots=plots_dir,
+            tag=tag,
         )
-        print("╚" + "═" * 60 + "╝")
 
-        for test_size in splits:
-            train_pct = int(round((1 - test_size) * 100))
-            test_pct = int(round(test_size * 100))
+        run_evaluation(
+            output_csv=output_csv,
+            model_output=model_dir,
+            output_plots=plots_dir,
+            test_size=test_size,
+            random_state=random_state,
+            data_dir=data_dir,
+            tag=tag,
+        )
 
-            tag = f"split_{train_pct}_{test_pct}{scenario_suffix}"
+        model_path = os.path.join(model_dir, "seismic_models.joblib")
+        saved = joblib.load(model_path)
+        for model_key, model_name in [("svm_best", "SVM-RBF"), ("xgb_best", "XGBoost")]:
+            mdl = saved[model_key]
+            y_pred = mdl.predict(saved["X_test"])
+            summary_rows.append({
+                "Feature_Set": "11_temporal_spectral",
+                "Split": f"{train_pct}/{test_pct}",
+                "Model": model_name,
+                "Accuracy": round(accuracy_score(saved["y_test"], y_pred), 4),
+                "F1_macro": round(f1_score(saved["y_test"], y_pred, average="macro", zero_division=0), 4),
+            })
 
-            model_dir = os.path.join(scenario_model_root, tag)
-            plots_dir = os.path.join(scenario_plot_root, tag)
-            os.makedirs(model_dir, exist_ok=True)
-            os.makedirs(plots_dir, exist_ok=True)
+        print(f"Selesai split {train_pct}/{test_pct}")
+        print(f"Model : {model_dir}")
+        print(f"Plots : {plots_dir}")
 
-            print()
-            print("╔" + "═" * 52 + "╗")
-            print(
-                f"║  {scenario_name} | Split {train_pct}/{test_pct}"
-                .ljust(52) + "║"
-            )
-            print("╚" + "═" * 52 + "╝")
-
-            # Training
-            run_training(
-                output_csv=output_csv,
-                model_output=model_dir,
-                test_size=test_size,
-                random_state=random_state,
-                blind_size=blind_size,
-                blind_seed=blind_seed,
-                data_dir=data_dir,
-                output_plots=plots_dir,
-                tag=tag,
-                use_fk=scenario_fk,
-            )
-
-            # Evaluation
-            run_evaluation(
-                output_csv=output_csv,
-                model_output=model_dir,
-                output_plots=plots_dir,
-                test_size=test_size,
-                random_state=random_state,
-                data_dir=data_dir,
-                tag=tag,
-            )
-
-            # Ringkasan metrik
-            model_path = os.path.join(model_dir, "seismic_models.joblib")
-            saved = joblib.load(model_path)
-
-            for model_key, model_name in [
-                ("svm_best", "SVM-RBF"),
-                ("xgb_best", "XGBoost"),
-            ]:
-                mdl = saved[model_key]
-                y_pred = mdl.predict(saved["X_test"])
-                acc = accuracy_score(saved["y_test"], y_pred)
-                f1 = f1_score(
-                    saved["y_test"],
-                    y_pred,
-                    average="macro",
-                    zero_division=0,
-                )
-
-                summary_rows.append({
-                    "Feature_Scenario": (
-                        "14_features_with_spatial"
-                        if scenario_fk
-                        else "11_features_without_spatial"
-                    ),
-                    "Split": f"{train_pct}/{test_pct}",
-                    "Model": model_name,
-                    "Accuracy": round(acc, 4),
-                    "F1_macro": round(f1, 4),
-                })
-
-            print(f"✅ Selesai: {scenario_name} — {train_pct}/{test_pct}")
-            print(f"   Model → {model_dir}")
-            print(f"   Plots → {plots_dir}")
-
-    # ==============================================================
-    # SATU TABEL RINGKASAN UNTUK SEMUA SKENARIO
-    # ==============================================================
     df_summary = pd.DataFrame(summary_rows)
-
-    os.makedirs(base_output_plots, exist_ok=True)
-    summary_path = os.path.join(
-        base_output_plots,
-        "summary_all_splits_11_vs_14_features.csv",
-    )
+    summary_path = os.path.join(base_output_plots, "summary_all_splits_11_features.csv")
     df_summary.to_csv(summary_path, index=False)
-
-    print()
-    print("╔" + "═" * 60 + "╗")
-    print("║  RINGKASAN 11 FITUR vs 14 FITUR — SEMUA SPLIT".ljust(60) + "║")
-    print("╚" + "═" * 60 + "╝")
+    print("\nRingkasan semua split:")
     print(df_summary.to_string(index=False))
-    print(f"\n✅ Ringkasan disimpan: {summary_path}")
-
+    print(f"\nRingkasan disimpan: {summary_path}")
     return df_summary
+
 # ===========================================================================
 # ARGUMENT PARSER
 # ===========================================================================
@@ -5662,233 +4746,105 @@ def save_prediction_report(results_df, class_names, test_size, output_dir, tag):
 
 def run_prediction(pred_input, model_output, output_plots,
                    station_coords=None, tag="", random_state=42):
-
+    """Prediksi menggunakan model 11 fitur temporal/spektral."""
     print()
     print("=" * 60)
-    print(f"TAHAP 4: PREDIKSI  [{tag}]")
+    print(f"TAHAP 4: PREDIKSI  [{tag}] — 11 FITUR")
     print("=" * 60)
     os.makedirs(output_plots, exist_ok=True)
 
-    # ── 1. Load model ─────────────────────────────────────────────────
     model_path = os.path.join(model_output, "seismic_models.joblib")
     if not os.path.exists(model_path):
         print(f"  [ERROR] Model tidak ditemukan: {model_path}")
-        print("  Pastikan --mode all_splits sudah dijalankan terlebih dahulu.")
         sys.exit(1)
 
-    saved       = joblib.load(model_path)
-    le          = saved["label_encoder"]
-    num_cols    = saved["feature_cols"]
-    svm_best    = saved["svm_best"]
-    xgb_best    = saved["xgb_best"]
-    test_size   = saved.get("test_size", TEST_SIZE)
+    saved = joblib.load(model_path)
+    le = saved["label_encoder"]
+    num_cols = saved["feature_cols"]
+    svm_best = saved["svm_best"]
+    xgb_best = saved["xgb_best"]
     class_names = le.classes_
 
-    # ── DETEKSI OTOMATIS: apakah model ini pakai FK atau tidak? ───────
-    # feature_cols yang tersimpan di model adalah sumber kebenaran —
-    # jika tidak mengandung 'Back_Azimuth', berarti model _no_fk (11 fitur)
-    FK_COLS  = ["Back_Azimuth", "Slowness", "Beam_Power"]
-    use_fk   = any(c in num_cols for c in FK_COLS)
-    print(f"  Model         : {model_path}")
-    print(f"  Fitur model   : {len(num_cols)} kolom | FK: {'✅ Ya' if use_fk else '❌ Tidak (no_fk)'}")
-    print(f"  Kelas         : {list(class_names)}")
+    print(f"  Model       : {model_path}")
+    print(f"  Jumlah fitur: {len(num_cols)}")
+    print(f"  Kelas       : {list(class_names)}")
 
-    # ── 2. Load / Ekstraksi fitur dari input ──────────────────────────
     tmp_csv = os.path.join(output_plots, "_pred_features_tmp.csv")
 
     if os.path.isfile(pred_input) and pred_input.lower().endswith(".csv"):
-        # Input sudah CSV — langsung pakai
         df_raw = pd.read_csv(pred_input)
-        print(f"  Input CSV: {pred_input} ({len(df_raw)} baris)")
-
     elif os.path.isdir(pred_input):
-        if station_coords is None:
-            station_coords = DEFAULT_STATION_COORDS
-
         has_label_subfolders = any(
-            os.path.isdir(os.path.join(pred_input, lbl))
-            for lbl in VALID_LABELS
+            os.path.isdir(os.path.join(pred_input, lbl)) for lbl in VALID_LABELS
         )
-
         if has_label_subfolders:
-            # Ada subfolder label → pakai run_feature_extraction (dengan/tanpa FK)
-            if use_fk:
-                df_raw = run_feature_extraction(
-                    data_dir     = pred_input,
-                    output_csv   = tmp_csv,
-                    station_coords = station_coords,
-                    valid_labels = list(class_names),
-                )
-            else:
-                # Model no_fk → ekstrak tanpa FK, lalu drop kolom FK jika ada
-                df_raw = run_feature_extraction(
-                    data_dir     = pred_input,
-                    output_csv   = tmp_csv,
-                    station_coords = station_coords,
-                    valid_labels = list(class_names),
-                )
-                # Drop kolom FK jika ikut terekstrak
-                df_raw = df_raw.drop(columns=[c for c in FK_COLS if c in df_raw.columns],
-                                     errors="ignore")
-        else:
-            # Flat folder → pakai run_feature_extraction_predict
-            df_raw = run_feature_extraction_predict(
-                data_dir     = pred_input,
-                output_csv   = tmp_csv,
-                station_coords = station_coords,
-                already_cut  = True,
+            df_raw = run_feature_extraction(
+                data_dir=pred_input,
+                output_csv=tmp_csv,
+                valid_labels=list(class_names),
             )
-            if df_raw is not None and not df_raw.empty:
-                if use_fk:
-                    # Model pakai FK tapi ekstraksi predict mungkin hasilkan nan
-                    # → pastikan kolom FK ada (sudah ada dari run_feature_extraction_predict)
-                    pass
-                else:
-                    # Model no_fk → drop kolom FK
-                    df_raw = df_raw.drop(
-                        columns=[c for c in FK_COLS if c in df_raw.columns],
-                        errors="ignore"
-                    )
+        else:
+            df_raw = run_feature_extraction_predict(
+                data_dir=pred_input,
+                output_csv=tmp_csv,
+                already_cut=True,
+            )
     else:
         df_raw = pd.read_csv(pred_input)
-        print(f"  Input fallback CSV: {pred_input} ({len(df_raw)} baris)")
 
-    # ── Guard: cek data ada ───────────────────────────────────────────
-    if df_raw is None or len(df_raw) == 0:
-        print("\n  [ERROR] Tidak ada data yang berhasil diekstrak dari input.")
+    if df_raw is None or df_raw.empty:
+        print("[ERROR] Tidak ada data yang berhasil diekstrak dari input.")
         return None
 
-    # ── 3. Cek kolom fitur — gunakan reindex agar tidak error ─────────
     missing = [c for c in num_cols if c not in df_raw.columns]
     if missing:
-        print(f"  [WARN] Kolom berikut tidak ada di input, diisi 0: {missing}")
-        # Jangan sys.exit — gunakan reindex dengan fillvalue=0
-        # agar pipeline tetap jalan (model akan handle dengan nilai 0)
+        print(f"[ERROR] Fitur model tidak tersedia pada input: {missing}")
+        return None
 
-    X_pred      = df_raw.reindex(columns=num_cols, fill_value=0.0)
-    event_names = df_raw["Event"].tolist() if "Event" in df_raw.columns \
-                  else [f"Sample_{i}" for i in range(len(df_raw))]
-    has_true    = "Label" in df_raw.columns and \
-                  df_raw["Label"].isin(le.classes_).all()
-    y_true      = le.transform(df_raw["Label"]) if has_true else None
+    X_pred = df_raw.reindex(columns=num_cols)
+    event_names = df_raw["Event"].tolist() if "Event" in df_raw.columns else [f"Sample_{i}" for i in range(len(df_raw))]
+    has_true = "Label" in df_raw.columns and df_raw["Label"].isin(le.classes_).all()
+    y_true = le.transform(df_raw["Label"]) if has_true else None
 
-    print(f"  Jumlah sampel : {len(X_pred)}")
-    print(f"  Label aktual  : {'Tersedia' if has_true else 'Tidak tersedia'}")
-    print()
-
-    # 3. Prediksi
     svm_pred_enc = svm_best.predict(X_pred)
-    svm_prob     = svm_best.predict_proba(X_pred)
+    svm_prob = svm_best.predict_proba(X_pred)
     xgb_pred_enc = xgb_best.predict(X_pred)
-    xgb_prob     = xgb_best.predict_proba(X_pred)
+    xgb_prob = xgb_best.predict_proba(X_pred)
 
-    svm_pred_lbl = le.inverse_transform(svm_pred_enc)
-    xgb_pred_lbl = le.inverse_transform(xgb_pred_enc)
-    svm_conf     = np.max(svm_prob, axis=1)
-    xgb_conf     = np.max(xgb_prob, axis=1)
-
-    # 4. Susun DataFrame hasil
-    results = {
-        "Event"          : event_names,
-        "SVM_Pred_Label" : svm_pred_lbl,
-        "SVM_Pred_Enc"   : svm_pred_enc,
-        "SVM_Confidence" : np.round(svm_conf, 4),
-        "XGB_Pred_Label" : xgb_pred_lbl,
-        "XGB_Pred_Enc"   : xgb_pred_enc,
-        "XGB_Confidence" : np.round(xgb_conf, 4),
-    }
-    for i, cn in enumerate(class_names):
-        results[f"SVM_Prob_{cn}"] = np.round(svm_prob[:, i], 4)
-        results[f"XGB_Prob_{cn}"] = np.round(xgb_prob[:, i], 4)
-    if has_true:
-        results["True_Label"]     = le.inverse_transform(y_true)
-        results["True_Label_Enc"] = y_true
-
-    results_df = pd.DataFrame(results)
-
-    # 5. Simpan CSV
-    csv_path = os.path.join(output_plots, f"prediction_results_{tag}.csv")
-    results_df.to_csv(csv_path, index=False)
-    print(f"  CSV hasil    : {csv_path}")
-
-    # Ringkasan konsol
-    n         = len(results_df)
-    agreement = (results_df["SVM_Pred_Label"] == results_df["XGB_Pred_Label"]).sum()
-    print(f"\n  Agreement (SVM == XGBoost) : {agreement}/{n} ({agreement/n*100:.1f}%)")
-    print(f"  SVM  mean confidence       : {svm_conf.mean():.4f}")
-    print(f"  XGB  mean confidence       : {xgb_conf.mean():.4f}")
-    print()
-
-    # 6. Plot
-    print("  Membuat plot prediksi...")
-    plot_prediction_overview(results_df, class_names, output_plots, tag)
-
-    # ── Baru: distribusi detail ──────────────────────────────────────
-    plot_prediction_distribution(
-        results_df, class_names, output_plots, tag,
-    )
-
-    # ── Baru: confidence detail ──────────────────────────────────────
-    plot_prediction_confidence_detail(
-        results_df, class_names, output_plots, tag,
-    )
-
-    # ── Lama: confidence ringkasan ───────────────────────────────────
-    plot_prediction_confidence(results_df, class_names, output_plots, tag)
-
-    plot_prediction_per_sample(
-        results_df, class_names, "SVM", output_plots, tag,
-    )
-    plot_prediction_per_sample(
-        results_df, class_names, "XGBoost", output_plots, tag,
-    )
+    results_df = pd.DataFrame({
+        "Event": event_names,
+        "SVM_Predicted": le.inverse_transform(svm_pred_enc),
+        "SVM_Confidence": np.max(svm_prob, axis=1),
+        "XGBoost_Predicted": le.inverse_transform(xgb_pred_enc),
+        "XGBoost_Confidence": np.max(xgb_prob, axis=1),
+    })
 
     if has_true:
-        plot_prediction_accuracy_vs_true(
-            results_df, class_names, output_plots, tag,
-        )
+        results_df["True_Label"] = df_raw["Label"].values
+        results_df["SVM_Correct"] = results_df["True_Label"] == results_df["SVM_Predicted"]
+        results_df["XGBoost_Correct"] = results_df["True_Label"] == results_df["XGBoost_Predicted"]
 
-    # ── Baru: waveform per kelas ─────────────────────────────────────
-    # Hanya jika pred_input adalah folder .mseed
-    # BARU — sesuai signature fungsi versi terbaru
-    if os.path.isdir(pred_input):
-        print("  Membuat plot waveform contoh (5 random)...")
-        plot_prediction_waveform_examples(
-            results_df=results_df,
-            data_dir=pred_input,
-            class_names=class_names,
-            output_dir=output_plots,
-            tag=tag,
-            n_samples=5,
-            random_state=42,
-        )
-        # Simpan semua waveform ke subfolder per kelas
-        print("\n Menyimpan semua waveform individu...")
-        save_all_waveforms(
-            results_df   = results_df,
-            data_dir     = pred_input,
-            class_names  = class_names,
-            output_dir   = output_plots,
-            tag          = tag,
-            paz          = _DEFAULT_PAZ,
-            prefilter    = _PREFILTER,
-            target_fs    = _TARGET_FS,
-            fmin         = _FMIN,
-            fmax         = _FMAX,
-        )
+    out_csv = os.path.join(output_plots, f"prediction_results_{tag}.csv")
+    results_df.to_csv(out_csv, index=False)
+    print(f"  Prediction CSV: {out_csv}")
 
-    # 7. Report
-    print("  Menyimpan prediction report (.txt)...")
-    save_prediction_report(results_df, class_names, test_size, output_plots, tag)
+    # Simpan klasifikasi/misclassification bila fungsi tersedia.
+    try:
+        for model_name, pred, prob in [
+            ("SVM", svm_pred_enc, svm_prob),
+            ("XGBoost", xgb_pred_enc, xgb_prob),
+        ]:
+            if has_true:
+                save_classification_and_misclassification(
+                    df_raw, X_pred, y_true, pred, prob, le,
+                    model_name, output_plots, tag
+                )
+    except Exception as e:
+        print(f"  [WARN] Penyimpanan classification/misclassification gagal: {e}")
 
-    print(f"\n✅ Prediksi selesai — output di: {output_plots}")
     return results_df
 
 
-# ⚠️ REKONSTRUKSI ⚠️
-# Isi asli tidak sempat terbaca sebelum SSD terputus. Ditulis ulang agar
-# fungsional setara — signature (df_summary, output_dir) dan tempat
-# pemanggilan (dari run_all_predictions, lihat di bawah) sama persis.
 def plot_prediction_cross_split(df_summary, output_dir):
     """
     Bar chart perbandingan ringkasan prediksi (agreement rate & mean
@@ -5961,13 +4917,13 @@ def run_all_predictions(
 
     Perubahan dari versi lama
     -------------------------
-    Versi lama hardcode suffix '_no_fk' sehingga hanya memproses
-    split_XX_YY_no_fk. Versi ini mendeteksi otomatis semua sub-folder
+    Versi lama hardcode suffix '' sehingga hanya memproses
+    split_XX_YY. Versi ini mendeteksi otomatis semua sub-folder
     yang berisi seismic_models.joblib — mendukung:
-      - split_60_40, split_60_40_no_fk
-      - split_70_30, split_70_30_no_fk
-      - split_80_20, split_80_20_no_fk
-      - split_90_10, split_90_10_no_fk
+      - split_60_40, split_60_40
+      - split_70_30, split_70_30
+      - split_80_20, split_80_20
+      - split_90_10, split_90_10
       - format lain apapun selama ada seismic_models.joblib di dalamnya
 
     Parameter
@@ -5986,9 +4942,9 @@ def run_all_predictions(
     base_output_plots/
     └── prediction/
         ├── split_60_40/          ← hasil predict model split_60_40
-        ├── split_60_40_no_fk/    ← hasil predict model split_60_40_no_fk
+        ├── split_60_40/    ← hasil predict model split_60_40
         ├── split_70_30/
-        ├── split_70_30_no_fk/
+        ├── split_70_30/
         ├── ...
         ├── prediction_summary_all_splits.csv
         └── prediction_summary_chart.png
@@ -6136,134 +5092,28 @@ def run_all_predictions(
 # ===========================================================================
 
 def parse_args():
-    """
-    Mendefinisikan dan mem-parsing argumen command-line untuk pipeline seismik.
-
-    Argumen
-    -------
-    --mode           : (wajib) Tahap pipeline.
-                       Pilihan: extract | train | evaluate | all | all_splits |
-                                predict | predict_all | blind_test | blind_new |
-                                blind_new_all
-    --data_dir       : Folder MiniSEED. Wajib untuk mode extract/all.
-    --output_csv     : Path CSV fitur (output extract / input train & evaluate).
-                       Default: ./output/features.csv
-    --model_output   : Folder model .joblib. Default: ./models
-    --output_plots   : Folder plot evaluasi.   Default: ./plots
-    --test_size      : Proporsi data test [0.0–1.0]. Default: 0.4
-    --random_state   : Random seed. Default: 42
-    --station_coords : Koordinat stasiun (JSON string atau path .json).
-                       Format: '{"KODE": [lat, lon], ...}'
-    --labels         : Daftar label kelas valid (nama subfolder).
-                       Default: Multiphase Rockfall VTB NonEvent
-    --no_fk          : Nonaktifkan fitur FK Analysis/Beamforming.
-
-    Contoh Penggunaan
-    -----------------
-    # One-click full pipeline:
-    python seismic_ml_pipeline.py --mode all \\
-        --data_dir /data/mseed \\
-        --output_csv /output/features.csv \\
-        --model_output /models \\
-        --output_plots /plots
-
-    # Hanya ekstraksi fitur:
-    python seismic_ml_pipeline.py --mode extract \\
-        --data_dir /data/mseed --output_csv /output/features.csv
-
-    # Dengan koordinat stasiun custom:
-    python seismic_ml_pipeline.py --mode all --data_dir /data \\
-        --output_csv /output/features.csv \\
-        --station_coords '{"STAT1": [-7.5, 110.4]}'
-
-    # Tanpa fitur FK (Back_Azimuth/Slowness/Beam_Power):
-    python seismic_ml_pipeline.py --mode extract --no_fk \\
-        --data_dir /data/mseed --output_csv /output/features.csv
-    python seismic_ml_pipeline.py --mode all_splits --no_fk \\
-        --output_csv /output/features.csv \\
-        --model_output /models --output_plots /plots --data_dir /data/mseed
-    """
     parser = argparse.ArgumentParser(
-        description="Seismic Event Classification Pipeline (SVM + XGBoost)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=parse_args.__doc__,
+        description="Seismic Event Classification Pipeline — 11 temporal/spectral features only"
     )
     parser.add_argument(
-        "--mode", required=True,
-        choices=["extract", "train", "evaluate", "all", "all_splits", "predict", "predict_all", "blind_test", "blind_new", "blind_new_all"],
-        help="Tahap pipeline: extract | train | evaluate | all | all_splits | predict | predict_all | blind_test | blind_new | blind_new_all",
+        "--mode",
+        choices=["extract", "train", "evaluate", "all", "all_splits",
+                 "predict", "predict_all", "blind_test", "blind_new", "blind_new_all"],
+        default="all",
+        help="Mode pipeline. Default: all",
     )
-    parser.add_argument(
-        "--data_dir", default=None,
-        help="Folder MiniSEED (subfolder berlabel). Wajib untuk mode extract/all.",
-    )
-    parser.add_argument(
-        "--output_csv", default="./output/features.csv",
-        help="Path file CSV fitur. Default: ./output/features.csv",
-    )
-    parser.add_argument(
-        "--model_output", default="./models",
-        help="Folder model .joblib. Default: ./models",
-    )
-    parser.add_argument(
-        "--output_plots", default="./plots",
-        help="Folder plot evaluasi. Default: ./plots",
-    )
-    parser.add_argument(
-        "--test_size", type=float, default=0.4,
-        help="Proporsi data test (0–1). Default: 0.4",
-    )
-    parser.add_argument(
-        "--random_state", type=int, default=42,
-        help="Random seed. Default: 42",
-    )
-    parser.add_argument(
-        "--station_coords", default=None,
-        help='Koordinat stasiun. JSON string atau path .json. Format: {"KODE": [lat, lon]}',
-    )
-    parser.add_argument(
-        "--labels", nargs="+", default=VALID_LABELS,
-        help=f"Nama subfolder label kelas. Default: {VALID_LABELS}",
-    )
-    parser.add_argument(
-        "--pred_input", default=None,
-        help=(
-            "Input data untuk prediksi. "
-            "Bisa berupa path file .csv (fitur) atau folder .mseed. "
-            "Wajib untuk mode predict / predict_all."
-        ),
-    )
-    parser.add_argument(
-        "--blind_size", type=float, default=0.0,
-        help=(
-            "Proporsi data yang disisihkan sebagai blind holdout SEBELUM "
-            "train/test split (0-1). Default: 0.0 (tidak ada blind holdout, "
-            "semua data dipakai train/test — pakai --mode blind_new dengan "
-            "dataset terpisah untuk blind test). Isi >0 (mis. 0.15) hanya "
-            "jika ingin blind test dari potongan dataset yang SAMA."
-        ),
-    )
-    parser.add_argument(
-        "--blind_seed", type=int, default=99,
-        help="Random seed blind test (harus BERBEDA dari --random_state). Default: 99",
-    )
-    parser.add_argument(
-        "--has_labels", action="store_true", default=False,
-        help="Gunakan flag ini jika data baru punya subfolder label.",
-    )
-    parser.add_argument(
-        "--already_cut", action="store_true", default=True,
-        help="True jika data .mseed sudah dipotong per event (default: True).",
-    )
-    parser.add_argument(
-        "--no_fk", action="store_true", default=False,
-        help=(
-            "Gunakan hanya 11 fitur temporal/spektral tanpa menambahkan "
-            "Back_Azimuth, Slowness, dan Beam_Power pada model. Untuk "
-            "--mode all_splits, pipeline otomatis menjalankan kedua skenario "
-            "(14 fitur dan 11 fitur), sehingga flag ini tidak diperlukan."
-        ),
-    )
+    parser.add_argument("--data_dir", default=None, help="Folder data .mseed")
+    parser.add_argument("--output_csv", default="./output/features.csv", help="CSV fitur")
+    parser.add_argument("--model_output", default="./models", help="Folder model .joblib")
+    parser.add_argument("--output_plots", default="./plots", help="Folder plot/evaluasi")
+    parser.add_argument("--test_size", type=float, default=0.4, help="Proporsi data test. Default: 0.4")
+    parser.add_argument("--random_state", type=int, default=42, help="Random seed")
+    parser.add_argument("--labels", nargs="+", default=VALID_LABELS, help=f"Nama subfolder label kelas. Default: {VALID_LABELS}")
+    parser.add_argument("--pred_input", default=None, help="File CSV atau folder waveform untuk prediksi/blind")
+    parser.add_argument("--blind_size", type=float, default=0.0, help="Proporsi blind holdout. Default: 0.0")
+    parser.add_argument("--blind_seed", type=int, default=99, help="Random seed blind test")
+    parser.add_argument("--has_labels", action="store_true", default=False, help="Data baru memiliki subfolder label")
+    parser.add_argument("--already_cut", action="store_true", default=True, help="Data waveform sudah dipotong per event")
     return parser.parse_args()
 
 
@@ -6272,40 +5122,22 @@ def parse_args():
 # ===========================================================================
 
 def main():
-    """
-    Entry point utama — mengorkestrasi seluruh pipeline sesuai argumen --mode.
-
-    Mode Eksekusi
-    -------------
-    all      : extract → train → evaluate  (one-click, end-to-end)
-    extract  : hanya baca .mseed → ekstrak fitur → simpan CSV
-    train    : hanya load CSV → latih SVM & XGBoost → simpan model
-    evaluate : hanya load model → evaluasi → simpan semua plot
-    blind_test : hanya load data blind → evaluasi → simpan semua plot
-    """
+    """Entry point utama untuk pipeline 11 fitur temporal/spektral."""
     args = parse_args()
-
-    # ── Flag --no_fk: otomatis suffix "_no_fk" pada path CSV fitur ────────
-    # Supaya extract & all_splits/train yang dijalankan dengan --no_fk selalu
-    # menulis/membaca CSV yang berbeda dari versi dengan-FK (tidak saling
-    # menimpa), tanpa harus ganti --output_csv manual setiap kali.
-    use_fk = not args.no_fk
-    if args.no_fk:
-        base, ext = os.path.splitext(args.output_csv)
-        args.output_csv = f"{base}_no_fk{ext or '.csv'}"
 
     print()
     print("╔══════════════════════════════════════════════════╗")
     print("║   Seismic Event Classification Pipeline 2026    ║")
+    print("║        11 TEMPORAL/SPECTRAL FEATURES ONLY       ║")
     print("╚══════════════════════════════════════════════════╝")
     print(f"  Mode       : {args.mode.upper()}")
-    print(f"  Fitur FK   : {'Aktif' if use_fk else 'NONAKTIF (no_fk)'}")
+    print("  FK         : TIDAK DIGUNAKAN")
+    print("  Beamforming: TIDAK DIGUNAKAN")
+    print("  Fitur      : 11 temporal/spectral")
     print(f"  Output CSV : {args.output_csv}")
     print(f"  Models dir : {args.model_output}")
     print(f"  Plots dir  : {args.output_plots}")
     print()
-
-    station_coords = load_station_coords(args.station_coords)
 
     if args.mode in ("extract", "all"):
         if args.data_dir is None:
@@ -6314,9 +5146,7 @@ def main():
         run_feature_extraction(
             data_dir=args.data_dir,
             output_csv=args.output_csv,
-            station_coords=station_coords,
             valid_labels=args.labels,
-            use_fk=use_fk,
         )
 
     if args.mode in ("train", "all"):
@@ -6330,7 +5160,6 @@ def main():
             data_dir=args.data_dir,
             output_plots=args.output_plots,
             tag=os.path.basename(os.path.normpath(args.model_output)),
-            use_fk=use_fk,
         )
 
     if args.mode in ("evaluate", "all"):
@@ -6344,62 +5173,17 @@ def main():
         )
 
     if args.mode == "all_splits":
-        # ==============================================================
-        # ONE-CLICK ALL SPLITS:
-        # 1) otomatis ekstrak 14 fitur dari waveform hasil beamforming
-        # 2) gunakan CSV 14 fitur yang sama untuk:
-        #      - model 14 fitur
-        #      - model 11 fitur (3 fitur spasial dibuang saat training)
-        # 3) jalankan split 60/40, 70/30, 80/20, 90/10
-        # ==============================================================
         if args.data_dir is None:
             print("[ERROR] --data_dir wajib untuk mode all_splits.")
             sys.exit(1)
-
-        if args.no_fk:
-            print(
-                "[INFO] --no_fk diabaikan pada mode all_splits karena "
-                "mode ini otomatis menjalankan KEDUA skenario: 14 dan 11 fitur."
-            )
-
-        if not os.path.exists(args.data_dir):
-            print(f"[ERROR] Folder data tidak ditemukan: {args.data_dir}")
-            sys.exit(1)
-
-        print()
-        print("=" * 64)
-        print("ONE-CLICK ALL SPLITS — EKSTRAKSI + ML 11 FITUR & 14 FITUR")
-        print("=" * 64)
-        print("  Tahap 1 : Beamforming → 1 waveform representatif → 14 fitur")
-        print("  Tahap 2 : ML skenario 14 fitur")
-        print("  Tahap 3 : ML skenario 11 fitur")
-        print("  Split    : 60/40, 70/30, 80/20, 90/10")
-        print("=" * 64)
-
-        # Selalu ekstrak CSV lengkap 14 fitur.
         df_extracted = run_feature_extraction(
             data_dir=args.data_dir,
             output_csv=args.output_csv,
-            station_coords=station_coords,
             valid_labels=args.labels,
-            use_fk=True,
         )
-
         if df_extracted is None or df_extracted.empty:
-            print(
-                "\n[ERROR] Tidak ada event yang berhasil diekstrak. "
-                "Training dibatalkan."
-            )
+            print("[ERROR] Tidak ada event yang berhasil diekstrak. Training dibatalkan.")
             sys.exit(1)
-
-        if not os.path.exists(args.output_csv):
-            print(
-                f"[ERROR] Ekstraksi selesai tetapi CSV tidak ditemukan: "
-                f"{args.output_csv}"
-            )
-            sys.exit(1)
-
-        # Satu CSV 14 fitur menjadi sumber kedua skenario.
         run_all_splits(
             output_csv=args.output_csv,
             base_model_output=args.model_output,
@@ -6408,42 +5192,38 @@ def main():
             blind_size=args.blind_size,
             blind_seed=args.blind_seed,
             data_dir=args.data_dir,
-            use_fk=True,
         )
 
-    if args.mode in ("predict", "predict_all"):
-        if args.pred_input is None:
-            print("[ERROR] --pred_input wajib untuk mode predict / predict_all.")
-            sys.exit(1)
+    if args.mode in ("predict", "predict_all") and args.pred_input is None:
+        print("[ERROR] --pred_input wajib untuk mode predict / predict_all.")
+        sys.exit(1)
 
     if args.mode == "predict":
-        # Gunakan --model_output langsung sebagai folder model
-        # (tidak perlu ditambah suffix apapun)
         run_prediction(
-            pred_input    = args.pred_input,
-            model_output  = args.model_output,   # ← langsung, tanpa tambahan suffix
-            output_plots  = args.output_plots,
-            station_coords = station_coords,
-            tag           = os.path.basename(args.model_output.rstrip("/\\")),
-            random_state  = args.random_state,
+            pred_input=args.pred_input,
+            model_output=args.model_output,
+            output_plots=args.output_plots,
+            station_coords=None,
+            tag=os.path.basename(args.model_output.rstrip("/\\")),
+            random_state=args.random_state,
         )
 
     if args.mode == "predict_all":
         run_all_predictions(
-            pred_input        = args.pred_input,
-            base_model_output = args.model_output,   # ← folder INDUK
-            base_output_plots = args.output_plots,
-            station_coords    = station_coords,
-            random_state      = args.random_state,
+            pred_input=args.pred_input,
+            base_model_output=args.model_output,
+            base_output_plots=args.output_plots,
+            station_coords=None,
+            random_state=args.random_state,
         )
 
     if args.mode == "blind_test":
         run_blind_test(
-            output_csv   = args.output_csv,
-            model_output = args.model_output,
-            output_plots = args.output_plots,
-            blind_size   = args.blind_size,
-            random_state = args.blind_seed,  # pakai seed berbeda!
+            output_csv=args.output_csv,
+            model_output=args.model_output,
+            output_plots=args.output_plots,
+            blind_size=args.blind_size,
+            random_state=args.blind_seed,
         )
 
     if args.mode == "blind_new":
@@ -6451,13 +5231,13 @@ def main():
             print("[ERROR] --pred_input wajib untuk mode blind_new.")
             sys.exit(1)
         run_blind_test_new_data(
-            pred_input     = args.pred_input,
-            model_output   = args.model_output,
-            output_plots   = args.output_plots,
-            station_coords = station_coords,
-            has_labels     = args.has_labels,
-            already_cut    = args.already_cut,
-            random_state   = args.random_state,
+            pred_input=args.pred_input,
+            model_output=args.model_output,
+            output_plots=args.output_plots,
+            station_coords=None,
+            has_labels=args.has_labels,
+            already_cut=args.already_cut,
+            random_state=args.random_state,
         )
 
     if args.mode == "blind_new_all":
@@ -6465,22 +5245,22 @@ def main():
             print("[ERROR] --pred_input wajib untuk mode blind_new_all.")
             sys.exit(1)
         run_blind_new_all(
-            pred_input        = args.pred_input,
-            base_model_output = args.model_output,
-            base_output_plots = args.output_plots,
-            station_coords    = station_coords,
-            has_labels        = args.has_labels,
-            already_cut       = args.already_cut,
-            random_state      = args.random_state,
+            pred_input=args.pred_input,
+            base_model_output=args.model_output,
+            base_output_plots=args.output_plots,
+            station_coords=None,
+            has_labels=args.has_labels,
+            already_cut=args.already_cut,
+            random_state=args.random_state,
         )
 
     print()
     print("╔══════════════════════════════════════════════════╗")
-    print("║               ✅ PIPELINE SELESAI                ║")
+    print("║               PIPELINE FINISH                    ║")
     print("╚══════════════════════════════════════════════════╝")
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     main()
 
 # Langkah 1 — ekstraksi fitur (sekali saja)
@@ -6490,7 +5270,7 @@ if __name__ == "__main__":
 # python seismic_classification_new.py --mode all_splits --output_csv ./output/features.csv --model_output ./models --output_plots ./plots --data_dir ./dataset_event
 
 # Langkah 2b — loop semua skenario split TANPA fitur FK
-# python seismic_classification_new.py --mode all_splits --no_fk --output_csv ./output/features.csv --model_output ./models --output_plots ./plots --data_dir ./dataset_event
+# python seismic_classification_new.py --mode all_splits --single_feature_set --output_csv ./output/features.csv --model_output ./models --output_plots ./plots --data_dir ./dataset_event
 
 # Langkah 3 — prediksi dengan salah satu model split
 # python seismic_classification_new.py --mode predict --pred_input ./dataset_predict --model_output ./models/split_60_40 --output_plots ./plots
