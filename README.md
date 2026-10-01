@@ -326,7 +326,6 @@ The repository is organized as follows:
 - `CITATION.cff`
 - `requirements.txt`
 - `src/`
-  - `preprocessing.py`
   - `sta_lta_detection.py`
   - `beamforming.py`
   - `fk_analysis.py`
