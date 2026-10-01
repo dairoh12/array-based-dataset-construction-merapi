@@ -162,7 +162,7 @@ Each candidate is subsequently evaluated using array processing and catalogue va
 
 Each candidate event is evaluated using the spatial coherence and propagation characteristics observed across the five stations.
 
-6.1 Beamforming
+### 6.1 Beamforming
 
 Beamforming is used to combine signals recorded at multiple stations while accounting for differences in arrival time.
 
@@ -173,7 +173,7 @@ suppress relatively incoherent components;
 evaluate signal coherence across the array; and
 determine the maximum beam power associated with the dominant arrival.
 
-6.2 Frequency–Wavenumber Analysis
+#### 6.2 Frequency–Wavenumber Analysis
 
 Frequency–Wavenumber (FK) analysis is used to estimate propagation characteristics, particularly:
 
@@ -242,7 +242,10 @@ Split	Training events	Testing events
 70:30	192	83
 80:20	220	55
 90:10	247	28
-9. Feature Extraction
+
+----
+
+## 9. Feature Extraction
 
 A total of 11 temporal and spectral features are extracted from each validated event.
 
@@ -262,7 +265,7 @@ Spectral entropy
 
 These features represent complementary characteristics of waveform amplitude, temporal shape, and frequency-domain energy distribution.
 
-10. Machine-Learning Models
+## 10. Machine-Learning Models
 
 Two supervised machine-learning algorithms are evaluated:
 
@@ -276,7 +279,9 @@ Extreme Gradient Boosting is used as a tree-based ensemble classification model.
 
 The two approaches provide complementary modelling strategies for evaluating the classification of the extracted temporal and spectral features.
 
-11. Model Training and Hyperparameter Optimisation
+-----
+
+## 11. Model Training and Hyperparameter Optimisation
 
 Hyperparameter optimisation is performed using:
 
@@ -298,7 +303,7 @@ Standardisation and SMOTE are fitted only on the training data within the cross-
 
 The detailed parameter search spaces used in the study are provided in the corresponding source code and configuration files.
 
-12. Evaluation Metrics
+## 12. Evaluation Metrics
 
 The classification models are evaluated using:
 
@@ -318,7 +323,7 @@ Macro-averaged metrics are used to evaluate performance across all classes witho
 
 Weighted-F1 accounts for the relative number of samples in each class.
 
-13. Principal Component Analysis
+## 13. Principal Component Analysis
 
 Principal Component Analysis (PCA) is used as an exploratory analysis of the feature space.
 
@@ -331,7 +336,7 @@ relationships among the extracted features.
 
 PCA is not used as an input transformation within the machine-learning classification pipeline.
 
-14. Repository Structure
+## 14. Repository Structure
 
 The repository is organized as follows:
 
@@ -369,7 +374,7 @@ array-based-dataset-construction-merapi/
 
 Note: The exact filenames in this structure should be updated to match the final source files actually uploaded to the repository.
 
-15. Software Requirements
+## 15. Software Requirements
 
 The workflow is implemented in Python.
 
@@ -401,7 +406,9 @@ macOS/Linux
 source venv/bin/activate
 Windows
 venv\Scripts\activate
-16. Installation
+___
+
+##16. Installation
 
 Clone the repository:
 
@@ -422,7 +429,7 @@ pip install -r requirements.txt
 
 Note: The commands above should be verified against the final repository structure and operating-system requirements before publication.
 
-17. Quick Test
+## 17. Quick Test
 
 A small example dataset is provided in:
 
@@ -445,7 +452,9 @@ Instead, it provides a lightweight example for verifying that the computational 
 Detailed quick-test instructions are provided in:
 
 quick_test/README.md
-18. Input Data
+_____
+
+## 18. Input Data
 Original research data
 
 The original continuous seismic waveform recordings used in the study were obtained from the UGM remote seismic array at Mount Merapi.
@@ -479,7 +488,7 @@ The example dataset is intended only to verify software execution and demonstrat
 
 It should not be interpreted as the original research dataset.
 
-19. Expected Outputs
+## 19. Expected Outputs
 
 Depending on the selected workflow, the code can generate outputs associated with:
 
@@ -500,7 +509,7 @@ learning curves.
 
 The exact output filenames and directory structure are described in the documentation accompanying each source module.
 
-20. Reproducibility
+## 20. Reproducibility
 
 The repository is provided to support transparency and reproducibility of the computational workflow described in the manuscript.
 
@@ -575,7 +584,7 @@ The public repository provides example/synthetic data for testing the computatio
 
 Reference catalogue sources are described in the manuscript and should be accessed through their respective data providers where permitted.
 
-23. Code Availability
+## 23. Code Availability
 
 The source code developed for the array-based seismic dataset construction and machine-learning workflow is openly available in this public repository.
 
@@ -594,7 +603,7 @@ Repository:
 
 The repository is intended to support transparent inspection and reuse of the computational workflow described in the associated publication.
 
-24. Citation
+## 24. Citation
 
 If you use this code or adapt the workflow in another study, please cite the associated publication:
 
@@ -606,7 +615,7 @@ DOI:
 
 [DOI_TO_BE_ADDED_AFTER_PUBLICATION]
 
-25. Authors
+## 25. Authors
 
 Dairoh
 Department of Physics, Faculty of Mathematics and Natural Sciences, Universitas Gadjah Mada, Indonesia
@@ -621,7 +630,7 @@ Department of Computer Science and Electronics, Faculty of Mathematics and Natur
 Wiwit Suryanto
 Department of Physics, Faculty of Mathematics and Natural Sciences, Universitas Gadjah Mada, Indonesia
 
-26. Acknowledgement
+## 26. Acknowledgement
 
 The authors acknowledge the Universitas Gadjah Mada seismic monitoring facilities and the institutions providing reference catalogue information used for event validation.
 
@@ -639,7 +648,7 @@ LICENSE
 
 for the complete license terms.
 
-28. Disclaimer
+## 28. Disclaimer
 
 This repository is provided for research and educational purposes.
 
@@ -647,7 +656,7 @@ The example or synthetic data included in the repository are intended to demonst
 
 The authors do not guarantee that the software will perform identically on seismic data acquired from different instruments, array geometries, volcanic environments, or observation periods without appropriate adaptation and validation.
 
-29. Contact
+##29. Contact
 
 For questions regarding the computational workflow or repository, please contact:
 
