@@ -418,7 +418,7 @@ Windows
 venv\Scripts\activate
 ___
 
-##16. Installation
+## 16. Installation
 
 Clone the repository:
 
@@ -569,7 +569,7 @@ example outputs where applicable.
 The limitations caused by restricted access to the original waveform data are explicitly documented.
 ---
 
-21. Reproducing the Main Study
+## 21. Reproducing the Main Study
 
 To reproduce the complete analysis, users require access to the original seismic waveform recordings and the corresponding reference catalogue information.
 
@@ -588,7 +588,10 @@ After obtaining the required data, the workflow should be executed according to 
 11. Train SVM-RBF and XGBoost
 12. Evaluate classification performance
 13. Generate confusion matrices and ROC/AUC results
-22. Data Availability
+
+---
+
+## 22. Data Availability
 
 The original seismic waveform data used in this study are not included in this repository because access to the recordings is subject to data-access restrictions.
 
@@ -653,8 +656,6 @@ Department of Physics, Faculty of Mathematics and Natural Sciences, Universitas 
 The authors acknowledge the Universitas Gadjah Mada seismic monitoring facilities and the institutions providing reference catalogue information used for event validation.
 ---
 
-27. License
-
 ## 27. License
 
 The source code in this repository is distributed under the **MIT License**.
@@ -678,7 +679,7 @@ The example or synthetic data included in the repository are intended to demonst
 The authors do not guarantee that the software will perform identically on seismic data acquired from different instruments, array geometries, volcanic environments, or observation periods without appropriate adaptation and validation.
 ---
 
-##29. Contact
+## 29. Contact
 
 For questions regarding the computational workflow or repository, please contact:
 
