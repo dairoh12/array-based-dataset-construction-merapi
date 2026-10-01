@@ -125,7 +125,9 @@ BMKG catalogue    BPPTKG catalogue
       v                v
    SVM-RBF          XGBoost
 Beamforming and FK analysis are used during the dataset-construction and validation stages. They are not used as machine-learning input features in the classification stage of this study.
------
+
+
+---
 
 ## 4. Waveform Preprocessing 
 
